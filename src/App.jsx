@@ -2,604 +2,414 @@ import { useEffect, useRef, useState } from "react";
 import "@mediapipe/camera_utils/camera_utils.js";
 import "@mediapipe/hands/hands.js";
 import "@mediapipe/face_mesh/face_mesh.js";
+import "./App.css";
 
 const HandsCtor = globalThis.Hands;
 const CameraCtor = globalThis.Camera;
-const HAND_CONNECTIONS = globalThis.HAND_CONNECTIONS;
 const FaceMeshCtor = globalThis.FaceMesh;
-const FACEMESH_CONTOURS = globalThis.FACEMESH_CONTOURS;
-
-const INDEX_FINGER_TIP = 8;
+const HAND_CONNECTIONS = globalThis.HAND_CONNECTIONS;
 
 const MEDIAPIPE_HANDS_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/";
 const MEDIAPIPE_FACE_MESH_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/";
 
-const LOG_DEBOUNCE_MS = 750;
+const INDEX_TIP = 8;
+const CHAR_SETTLE_MS = 540;
+const MIN_STROKE_POINTS = 10;
+const MIN_STROKE_LENGTH = 0.26;
+const MAX_FIELD_LENGTH = 24;
 
-/**
- * Map normalized landmark (0–1) to canvas pixels (object-fit: contain box).
- */
-function normalizedToCanvas(lm, videoWidth, videoHeight, cw, ch) {
-  const vr = videoWidth / videoHeight;
-  const cr = cw / ch;
-  let sx;
-  let sy;
-  let sw;
-  let sh;
-  if (cr > vr) {
-    sh = ch;
-    sw = ch * vr;
-    sx = (cw - sw) / 2;
-    sy = 0;
-  } else {
-    sw = cw;
-    sh = cw / vr;
-    sx = 0;
-    sy = (ch - sh) / 2;
+const ALPHANUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function pathLength(points) {
+  let sum = 0;
+  for (let i = 1; i < points.length; i += 1) sum += dist(points[i - 1], points[i]);
+  return sum;
+}
+
+function resample(points, n) {
+  const D = pathLength(points);
+  if (D <= 0 || points.length === 0) return points.slice();
+  const I = D / (n - 1);
+  let d = 0;
+  const out = [points[0]];
+  const work = points.map((p) => ({ ...p }));
+  let i = 1;
+  while (i < work.length) {
+    const cur = work[i - 1];
+    const next = work[i];
+    const seg = dist(cur, next);
+    if (d + seg >= I) {
+      const t = (I - d) / seg;
+      const q = {
+        x: cur.x + t * (next.x - cur.x),
+        y: cur.y + t * (next.y - cur.y),
+      };
+      out.push(q);
+      work.splice(i, 0, q);
+      d = 0;
+    } else {
+      d += seg;
+      i += 1;
+    }
   }
-  return { x: sx + lm.x * sw, y: sy + lm.y * sh };
+  while (out.length < n) out.push({ ...out[out.length - 1] });
+  return out;
 }
 
-function canvasPointToClient(containerEl, canvasWidth, canvasHeight, x, y) {
-  const rect = containerEl.getBoundingClientRect();
-  return {
-    clientX: rect.left + (x / canvasWidth) * rect.width,
-    clientY: rect.top + (y / canvasHeight) * rect.height,
-  };
+function normalize(points) {
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const w = Math.max(0.001, maxX - minX);
+  const h = Math.max(0.001, maxY - minY);
+  return points.map((p) => ({ x: (p.x - minX) / w, y: (p.y - minY) / h }));
 }
 
-function mirrorClientXInRect(rect, clientX) {
-  return rect.left + rect.width - (clientX - rect.left);
+function to8Dir(a, b) {
+  const angle = Math.atan2(b.y - a.y, b.x - a.x);
+  const bin = Math.round((angle / (Math.PI / 4) + 8)) % 8;
+  return bin;
 }
 
-/** Tip closer to wrist than PIP → finger curled (MediaPipe hand indices). */
-function isFingerCurled(lm, tipIdx, pipIdx) {
+function directions(points) {
+  const dirs = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const d = to8Dir(points[i - 1], points[i]);
+    if (dirs.length === 0 || dirs[dirs.length - 1] !== d) dirs.push(d);
+  }
+  return dirs;
+}
+
+function weightedEditDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, () =>
+    Array.from({ length: b.length + 1 }, () => 0),
+  );
+  for (let i = 0; i <= a.length; i += 1) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j += 1) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const subCost = Math.min(Math.abs(a[i - 1] - b[j - 1]), 8 - Math.abs(a[i - 1] - b[j - 1])) / 2;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + subCost,
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function isFingerExtended(lm, tip, pip) {
   const w = lm[0];
-  const dTip = Math.hypot(lm[tipIdx].x - w.x, lm[tipIdx].y - w.y);
-  const dPip = Math.hypot(lm[pipIdx].x - w.x, lm[pipIdx].y - w.y);
-  return dTip < dPip * 0.99;
-}
-
-/** Tip farther from wrist than PIP → finger extended. */
-function isFingerExtended(lm, tipIdx, pipIdx) {
-  const w = lm[0];
-  const dTip = Math.hypot(lm[tipIdx].x - w.x, lm[tipIdx].y - w.y);
-  const dPip = Math.hypot(lm[pipIdx].x - w.x, lm[pipIdx].y - w.y);
+  const dTip = Math.hypot(lm[tip].x - w.x, lm[tip].y - w.y);
+  const dPip = Math.hypot(lm[pip].x - w.x, lm[pip].y - w.y);
   return dTip > dPip * 1.03;
 }
 
-function handScale(lm) {
+function isFingerCurled(lm, tip, pip) {
   const w = lm[0];
-  const d = (i) => Math.hypot(lm[i].x - w.x, lm[i].y - w.y);
-  return Math.max(0.055, d(5), d(9), d(17));
+  const dTip = Math.hypot(lm[tip].x - w.x, lm[tip].y - w.y);
+  const dPip = Math.hypot(lm[pip].x - w.x, lm[pip].y - w.y);
+  return dTip < dPip * 0.99;
 }
 
-/**
- * Point: index extended; thumb, middle, ring, pinky curled.
- */
-function isPointingPose(lm) {
-  if (!lm || lm.length < 21) return false;
-  if (!isFingerExtended(lm, 8, 6)) return false;
-  if (!isFingerCurled(lm, 4, 3)) return false;
-  if (!isFingerCurled(lm, 12, 10)) return false;
-  if (!isFingerCurled(lm, 16, 14)) return false;
-  if (!isFingerCurled(lm, 20, 18)) return false;
-  const scale = handScale(lm);
-  if (Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y) < scale * 0.85) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * Thumb extended (tip past IP joint relative to wrist).
- */
-function isThumbExtended(lm) {
-  const w = lm[0];
-  const d = (i) => Math.hypot(lm[i].x - w.x, lm[i].y - w.y);
-  return d(4) > d(3) * 1.04 && d(4) > d(2) * 0.92;
-}
-
-/** Index, middle, ring, pinky all curled — palm clear for thumb gestures. */
-function areNonThumbFingersCurled(lm) {
+function isOpenPalm(lm) {
   return (
-    isFingerCurled(lm, 8, 6) &&
+    isFingerExtended(lm, 8, 6) &&
+    isFingerExtended(lm, 12, 10) &&
+    isFingerExtended(lm, 16, 14) &&
+    isFingerExtended(lm, 20, 18)
+  );
+}
+
+function palmFacing(lm) {
+  const w = lm[0];
+  const i = lm[5];
+  const p = lm[17];
+  const v1 = { x: i.x - w.x, y: i.y - w.y, z: i.z - w.z };
+  const v2 = { x: p.x - w.x, y: p.y - w.y, z: p.z - w.z };
+  const nz = v1.x * v2.y - v1.y * v2.x;
+  const palm = [0, 5, 9, 13, 17];
+  const tips = [4, 8, 12, 16, 20];
+  const palmZ = palm.reduce((s, idx) => s + lm[idx].z, 0) / palm.length;
+  const tipsZ = tips.reduce((s, idx) => s + lm[idx].z, 0) / tips.length;
+  const depth = tipsZ - palmZ;
+  if (Math.abs(depth) < 0.008) return "unknown";
+  const frontLike = depth < 0;
+  return frontLike ^ (nz > 0) ? "palm" : "back";
+}
+
+function isPointingPose(lm) {
+  return (
+    isFingerExtended(lm, 8, 6) &&
     isFingerCurled(lm, 12, 10) &&
     isFingerCurled(lm, 16, 14) &&
     isFingerCurled(lm, 20, 18)
   );
 }
 
-/**
- * Thumbs up / down: only thumb extended; vertical tip vs MCP, scale-normalized.
- */
-function isThumbsUpPose(lm) {
-  if (!lm || lm.length < 21) return false;
-  if (!areNonThumbFingersCurled(lm)) return false;
-  if (!isThumbExtended(lm)) return false;
-  const scale = handScale(lm);
-  const dy = (lm[4].y - lm[2].y) / scale;
-  return dy < -0.22;
-}
-
-function isThumbsDownPose(lm) {
-  if (!lm || lm.length < 21) return false;
-  if (!areNonThumbFingersCurled(lm)) return false;
-  if (!isThumbExtended(lm)) return false;
-  const scale = handScale(lm);
-  const dy = (lm[4].y - lm[2].y) / scale;
-  return dy > 0.22;
-}
-
-/**
- * Scale-invariant head pose proxies: divide by inter-eye distance so thresholds
- * work at different distances from the camera.
- */
-function faceHeadMetricsNormalized(lm) {
+function facePitch(lm) {
   const nose = lm[1];
   const le = lm[33];
   const re = lm[263];
-  const eyeMidX = (le.x + re.x) / 2;
   const eyeMidY = (le.y + re.y) / 2;
-  const faceScale = Math.max(0.042, Math.hypot(re.x - le.x, re.y - le.y));
-  // Nod "yes": nose moves down in image (y+) then back — track vs eyes.
-  const pitchNorm = (nose.y - eyeMidY) / faceScale;
-  // Shake "no": nose shifts horizontally vs eye midline.
-  const yawNorm = (nose.x - eyeMidX) / faceScale;
-  return { pitchNorm, yawNorm, faceScale };
+  const scale = Math.max(0.04, Math.hypot(re.x - le.x, re.y - le.y));
+  return (nose.y - eyeMidY) / scale;
+}
+
+const CHAR_TEMPLATES = {
+  A: "24602024",
+  B: "0602424642",
+  C: "2460",
+  D: "06420",
+  E: "242424",
+  F: "2424",
+  G: "246020",
+  H: "20242",
+  I: "202",
+  J: "66042",
+  K: "20464",
+  L: "20",
+  M: "24202",
+  N: "2420",
+  O: "2460",
+  P: "0642",
+  Q: "24606",
+  R: "06426",
+  S: "6060",
+  T: "220",
+  U: "042",
+  V: "042",
+  W: "04042",
+  X: "4646",
+  Y: "640",
+  Z: "2620",
+  0: "2460",
+  1: "0",
+  2: "2620",
+  3: "6660",
+  4: "402",
+  5: "24260",
+  6: "246042",
+  7: "20",
+  8: "24602460",
+  9: "246020",
+};
+
+function recognizeAlnum(stroke) {
+  const simplified = normalize(resample(stroke, 24));
+  const dirs = directions(simplified);
+  if (dirs.length === 0) return null;
+  let best = { ch: null, score: Number.POSITIVE_INFINITY };
+  for (const ch of ALPHANUM) {
+    const tpl = CHAR_TEMPLATES[ch];
+    if (!tpl) continue;
+    const arr = tpl.split("").map((d) => Number(d));
+    const score = weightedEditDistance(dirs, arr);
+    if (score < best.score) best = { ch, score };
+  }
+  return best.score <= 7 ? best.ch : null;
 }
 
 export default function App() {
-  const containerRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const buttonRef = useRef(null);
-  const nameRef = useRef("User");
-  const setClickCountRef = useRef(() => {});
+  const userRef = useRef(null);
+  const passRef = useRef(null);
+  const activeFieldRef = useRef(null);
+  const pendingFieldRef = useRef(null);
 
-  const [name, setName] = useState("User");
-  const [handCount, setHandCount] = useState(0);
-  const [faceCount, setFaceCount] = useState(0);
-  const [pointerHud, setPointerHud] = useState(null);
-  const [actions, setActions] = useState([]);
-  const [clickCount, setClickCount] = useState(0);
-  const [buttonHovered, setButtonHovered] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [activeField, setActiveField] = useState(null);
+  const [pendingField, setPendingField] = useState(null);
+  const [status, setStatus] = useState("Show open palm for username, back of hand for password.");
+  const [handsSeen, setHandsSeen] = useState(0);
+  const [recognizedChar, setRecognizedChar] = useState("");
+  const [isWriting, setIsWriting] = useState(false);
 
-  nameRef.current = (name.trim() || "User");
-  setClickCountRef.current = setClickCount;
+  activeFieldRef.current = activeField;
+  pendingFieldRef.current = pendingField;
 
   useEffect(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!video || !canvas || !container) return undefined;
+    if (!video || !canvas) return undefined;
+    if (!HandsCtor || !CameraCtor || !FaceMeshCtor) return undefined;
 
     let disposed = false;
     const ctx = canvas.getContext("2d");
 
-    if (
-      !HandsCtor ||
-      !CameraCtor ||
-      !HAND_CONNECTIONS ||
-      !FaceMeshCtor ||
-      !FACEMESH_CONTOURS
-    ) {
-      console.error("MediaPipe globals missing after loading scripts.");
-      return undefined;
-    }
-
-
-    const latestHands = { r: null };
-    const latestFace = { r: null };
-
-    let lastLogAt = 0;
-    let gestureActive = {
-      thumbUp: false,
-      thumbDown: false,
-      point: false,
-    };
-
-    /** ---- Nod (yes): down-then-up on scale-normalized pitch ---- */
     let nodBaseline = null;
     let nodSmooth = null;
     let nodState = "idle";
-    let nodArmedAt = 0;
     let nodPeak = 0;
-    let nodRefBaseline = 0;
+    let nodRef = 0;
+    let nodAt = 0;
     let nodCooldownUntil = 0;
 
-    const NOD_BASELINE_ALPHA = 0.045;
-    const NOD_SMOOTH_ALPHA = 0.32;
-    /** Start nod when pitch clearly exceeds resting baseline. */
-    const NOD_TRIGGER_DELTA = 0.082;
-    /** Complete when pitch falls this far from the peak (return phase). */
-    const NOD_RETURN_FROM_PEAK = 0.058;
-    /** Peak must be this far above the baseline snapshot (real nod amplitude). */
-    const NOD_MIN_PEAK_ABOVE_REF = 0.048;
-    const NOD_ARM_MAX_MS = 1200;
-    const NOD_COOLDOWN_MS = 280;
+    const latestPrimary = { hand: null, handedness: null };
+    let stroke = [];
+    let lastStrokeAt = 0;
 
-    /** ---- Shake (no): oscillating yaw in a short window ---- */
-    let yawSmooth = null;
-    const shakeBuf = [];
-    const SHAKE_WIN = 32;
-    const SHAKE_SMOOTH = 0.38;
-    const SHAKE_MIN_SPREAD = 0.068;
-    const SHAKE_MIN_PATH = 0.14;
-    const SHAKE_MIN_REVERSALS = 4;
-    const SHAKE_MIN_STEP = 0.006;
-
-    let nextActionId = 0;
-
-    const pointerOverButtonRef = { current: false };
-    let lastPointerOverButtonAt = 0;
-    /** After index leaves the button, thumbs-up can still “click” briefly. */
-    const HOVER_LATCH_MS = 550;
-
-    /** Forward poke: index tip z (depth) moves toward camera while over button. */
-    let pokeZSmooth = null;
-    const pokeZBuffer = [];
-    const POKE_Z_SMOOTH = 0.38;
-    const POKE_BUFFER_MAX = 9;
-    /**
-     * Tip vs wrist z (MediaPipe depth). Forward poke: mean early − mean late
-     * positive (tip moves closer / more negative z relative to wrist). If it
-     * never fires, flip the comparison in code below.
-     */
-    const POKE_DEPTH_DELTA = 0.028;
-    const FORWARD_POKE_COOLDOWN_MS = 520;
-    let lastForwardPokeAt = 0;
-
-    function pointingHandsOverButton(results) {
-      const list = [];
-      const btn = buttonRef.current;
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!btn || !vw || !vh) return list;
-      const cw = container.clientWidth;
-      const ch = container.clientHeight;
-      const br = btn.getBoundingClientRect();
-      const cr = container.getBoundingClientRect();
-      for (const lm of results.multiHandLandmarks ?? []) {
-        if (!isPointingPose(lm)) continue;
-        const tipCanvas = normalizedToCanvas(lm[8], vw, vh, cw, ch);
-        const raw = canvasPointToClient(
-          container,
-          cw,
-          ch,
-          tipCanvas.x,
-          tipCanvas.y,
-        );
-        const cx = mirrorClientXInRect(cr, raw.clientX);
-        const cy = raw.clientY;
-        if (
-          cx >= br.left &&
-          cx <= br.right &&
-          cy >= br.top &&
-          cy <= br.bottom
-        ) {
-          list.push(lm);
-        }
+    const commitChar = (ch) => {
+      if (!ch) return;
+      setRecognizedChar(ch);
+      setTimeout(() => setRecognizedChar(""), 700);
+      const targetField = activeFieldRef.current;
+      if (targetField === "username") {
+        setUsername((prev) => (prev + ch).slice(0, MAX_FIELD_LENGTH));
+      } else if (targetField === "password") {
+        setPassword((prev) => (prev + ch).slice(0, MAX_FIELD_LENGTH));
       }
-      return list;
-    }
+    };
 
-    function updateButtonHoverFromHands(results) {
-      const now = performance.now();
-      const btn = buttonRef.current;
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!btn || !vw || !vh) {
-        pointerOverButtonRef.current = false;
-        setButtonHovered((prev) => (prev ? false : prev));
+    const maybeFinalizeStroke = (now) => {
+      if (stroke.length < MIN_STROKE_POINTS) return;
+      if (now - lastStrokeAt < CHAR_SETTLE_MS) return;
+      const len = pathLength(stroke);
+      if (len < MIN_STROKE_LENGTH) {
+        stroke = [];
+        setIsWriting(false);
         return;
       }
-      const over = pointingHandsOverButton(results).length > 0;
-      pointerOverButtonRef.current = over;
-      if (over) lastPointerOverButtonAt = now;
-      setButtonHovered((prev) => (prev === over ? prev : over));
-    }
+      const ch = recognizeAlnum(stroke);
+      commitChar(ch);
+      stroke = [];
+      setIsWriting(false);
+    };
 
-    function detectForwardPokeClick(results) {
-      const overHands = pointingHandsOverButton(results);
-      const lm = overHands[0];
-      const now = performance.now();
-      if (!lm) {
-        pokeZSmooth = null;
-        pokeZBuffer.length = 0;
-        return;
-      }
-      const z = lm[INDEX_FINGER_TIP].z - lm[0].z;
-      pokeZSmooth =
-        pokeZSmooth === null
-          ? z
-          : POKE_Z_SMOOTH * z + (1 - POKE_Z_SMOOTH) * pokeZSmooth;
-      pokeZBuffer.push(pokeZSmooth);
-      if (pokeZBuffer.length > POKE_BUFFER_MAX) pokeZBuffer.shift();
-
-      if (now - lastForwardPokeAt < FORWARD_POKE_COOLDOWN_MS) return;
-      if (pokeZBuffer.length < 6) return;
-
-      const head = pokeZBuffer.slice(0, 3);
-      const tail = pokeZBuffer.slice(-3);
-      const meanHead = head.reduce((a, b) => a + b, 0) / head.length;
-      const meanTail = tail.reduce((a, b) => a + b, 0) / tail.length;
-      if (meanHead - meanTail > POKE_DEPTH_DELTA) {
-        tryGestureButtonClick();
-        lastForwardPokeAt = now;
-        pokeZBuffer.length = 0;
-        pokeZSmooth = null;
-      }
-    }
-
-    function tryGestureButtonClick() {
-      const now = performance.now();
-      const overNow = pointerOverButtonRef.current;
-      const latched =
-        overNow || now - lastPointerOverButtonAt < HOVER_LATCH_MS;
-      if (!latched) return;
-      setClickCountRef.current((c) => c + 1);
-    }
-
-    function canLog(now) {
-      return now - lastLogAt >= LOG_DEBOUNCE_MS;
-    }
-
-    function appendLog(kind) {
-      const now = performance.now();
-      if (!canLog(now)) return;
-      lastLogAt = now;
-      const n = nameRef.current || "User";
-      let line;
-      if (kind === "point") line = `${n} pointed`;
-      else if (kind === "thumbUp") line = `${n} thumbs up`;
-      else if (kind === "thumbDown") line = `${n} thumbs down`;
-      else if (kind === "nod") line = `${n} nodded`;
-      else line = `${n} shook head`;
-      nextActionId += 1;
-      setActions((prev) =>
-        [{ id: nextActionId, text: line }, ...prev].slice(0, 200),
-      );
-    }
-
-    function detectHandGestures(multiLandmarks) {
-      const primary = multiLandmarks?.[0];
-      if (!primary) {
-        gestureActive = { thumbUp: false, thumbDown: false, point: false };
-        return;
-      }
-      const thumbUp = isThumbsUpPose(primary);
-      const thumbDown = isThumbsDownPose(primary);
-      const point =
-        !thumbUp && !thumbDown && isPointingPose(primary);
-
-      if (thumbUp && !gestureActive.thumbUp) {
-        appendLog("thumbUp");
-        tryGestureButtonClick();
-      } else if (thumbDown && !gestureActive.thumbDown) {
-        appendLog("thumbDown");
-      } else if (point && !gestureActive.point) appendLog("point");
-
-      gestureActive = { thumbUp, thumbDown, point };
-    }
-
-    function resetShakeState() {
-      shakeBuf.length = 0;
-      yawSmooth = null;
-    }
-
-    function detectNodShake(faceLm) {
-      if (!faceLm || faceLm.length < 264) return;
-      const now = performance.now();
-      const { pitchNorm, yawNorm } = faceHeadMetricsNormalized(faceLm);
-
-      nodSmooth =
-        nodSmooth === null
-          ? pitchNorm
-          : NOD_SMOOTH_ALPHA * pitchNorm +
-            (1 - NOD_SMOOTH_ALPHA) * nodSmooth;
-
-      if (nodState === "idle") {
-        nodBaseline =
-          nodBaseline === null
-            ? pitchNorm
-            : NOD_BASELINE_ALPHA * pitchNorm +
-              (1 - NOD_BASELINE_ALPHA) * nodBaseline;
-
-        if (
-          now >= nodCooldownUntil &&
-          nodSmooth > nodBaseline + NOD_TRIGGER_DELTA
-        ) {
-          nodState = "armed";
-          nodArmedAt = now;
-          nodRefBaseline = nodBaseline;
-          nodPeak = nodSmooth;
-        }
-      } else if (nodState === "armed") {
-        if (nodSmooth > nodPeak) nodPeak = nodSmooth;
-
-        if (now - nodArmedAt > NOD_ARM_MAX_MS) {
-          nodState = "idle";
-          nodCooldownUntil = now + NOD_COOLDOWN_MS;
-        } else if (
-          nodPeak > nodRefBaseline + NOD_MIN_PEAK_ABOVE_REF &&
-          nodPeak - nodSmooth > NOD_RETURN_FROM_PEAK
-        ) {
-          appendLog("nod");
-          tryGestureButtonClick();
-          nodState = "idle";
-          nodCooldownUntil = now + NOD_COOLDOWN_MS;
-          nodBaseline =
-            nodBaseline === null
-              ? pitchNorm
-              : 0.55 * nodBaseline + 0.45 * pitchNorm;
-          resetShakeState();
-        }
-      }
-
-      yawSmooth =
-        yawSmooth === null
-          ? yawNorm
-          : SHAKE_SMOOTH * yawNorm + (1 - SHAKE_SMOOTH) * yawSmooth;
-
-      shakeBuf.push(yawSmooth);
-      if (shakeBuf.length > SHAKE_WIN) shakeBuf.shift();
-
-      if (shakeBuf.length < SHAKE_WIN || nodState === "armed") return;
-
-      const mean =
-        shakeBuf.reduce((s, v) => s + v, 0) / shakeBuf.length;
-      const centered = shakeBuf.map((v) => v - mean);
-      const spread = Math.max(...centered) - Math.min(...centered);
-      if (spread < SHAKE_MIN_SPREAD) return;
-
-      let path = 0;
-      for (let i = 1; i < centered.length; i++) {
-        path += Math.abs(centered[i] - centered[i - 1]);
-      }
-      if (path < SHAKE_MIN_PATH) return;
-
-      let reversals = 0;
-      for (let i = 2; i < centered.length; i++) {
-        const d0 = centered[i - 1] - centered[i - 2];
-        const d1 = centered[i] - centered[i - 1];
-        if (
-          d0 * d1 < 0 &&
-          Math.abs(d0) > SHAKE_MIN_STEP &&
-          Math.abs(d1) > SHAKE_MIN_STEP
-        ) {
-          reversals += 1;
-        }
-      }
-
-      if (reversals >= SHAKE_MIN_REVERSALS) {
-        appendLog("shake");
-        resetShakeState();
-        nodState = "idle";
-        nodCooldownUntil = now + NOD_COOLDOWN_MS;
-      }
-    }
-
-    function paint() {
+    const drawOverlay = () => {
       if (disposed) return;
-      const cw = container.clientWidth;
-      const ch = container.clientHeight;
-      if (cw === 0 || ch === 0) return;
-
+      const cw = video.videoWidth || 1280;
+      const ch = video.videoHeight || 720;
       if (canvas.width !== cw || canvas.height !== ch) {
         canvas.width = cw;
         canvas.height = ch;
       }
-
       ctx.clearRect(0, 0, cw, ch);
-
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh) return;
-
-      const faceLm = latestFace.r;
-      if (faceLm) {
-        ctx.strokeStyle = "rgba(45, 212, 191, 0.45)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        for (const [a, b] of FACEMESH_CONTOURS) {
-          const A = normalizedToCanvas(faceLm[a], vw, vh, cw, ch);
-          const B = normalizedToCanvas(faceLm[b], vw, vh, cw, ch);
-          ctx.moveTo(A.x, A.y);
-          ctx.lineTo(B.x, B.y);
-        }
-        ctx.stroke();
-      }
-
-      const handsRes = latestHands.r;
-      const landmarksList = handsRes?.multiHandLandmarks ?? [];
-      for (let h = 0; h < landmarksList.length; h++) {
-        const landmarks = landmarksList[h];
-        ctx.strokeStyle = "rgba(192, 132, 252, 0.9)";
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.translate(-cw, 0);
+      if (latestPrimary.hand) {
+        ctx.strokeStyle = "rgba(255,255,255,0.75)";
         ctx.lineWidth = 2;
-        ctx.beginPath();
-        for (const [a, b] of HAND_CONNECTIONS) {
-          const A = normalizedToCanvas(landmarks[a], vw, vh, cw, ch);
-          const B = normalizedToCanvas(landmarks[b], vw, vh, cw, ch);
-          ctx.moveTo(A.x, A.y);
-          ctx.lineTo(B.x, B.y);
-        }
-        ctx.stroke();
-
-        ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
-        for (const lm of landmarks) {
-          const p = normalizedToCanvas(lm, vw, vh, cw, ch);
+        for (const [a, b] of HAND_CONNECTIONS || []) {
+          const A = latestPrimary.hand[a];
+          const B = latestPrimary.hand[b];
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 2.5, 0, 2 * Math.PI);
-          ctx.fill();
+          ctx.moveTo(A.x * cw, A.y * ch);
+          ctx.lineTo(B.x * cw, B.y * ch);
+          ctx.stroke();
         }
-
-        const tipLm = landmarks[INDEX_FINGER_TIP];
-        const tip = normalizedToCanvas(tipLm, vw, vh, cw, ch);
-        ctx.strokeStyle = "#f0abfc";
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(tip.x, tip.y, 10, 0, 2 * Math.PI);
-        ctx.stroke();
-        ctx.fillStyle = "rgba(240, 171, 252, 0.35)";
-        ctx.fill();
       }
-    }
+      if (stroke.length > 1) {
+        ctx.strokeStyle = "rgba(129, 140, 248, 0.95)";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(stroke[0].x * cw, stroke[0].y * ch);
+        for (let i = 1; i < stroke.length; i += 1) {
+          ctx.lineTo(stroke[i].x * cw, stroke[i].y * ch);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    const confirmSelection = () => {
+      const field = pendingFieldRef.current;
+      if (!field) return;
+      setActiveField(field);
+      setStatus(
+        field === "username"
+          ? "Username selected. Start air-writing letters or numbers."
+          : "Password selected. Start air-writing letters or numbers.",
+      );
+      if (field === "username") userRef.current?.focus();
+      if (field === "password") passRef.current?.focus();
+      setPendingField(null);
+    };
+
+    const detectNod = (faceLm) => {
+      const now = performance.now();
+      const pitch = facePitch(faceLm);
+      nodSmooth = nodSmooth === null ? pitch : 0.34 * pitch + 0.66 * nodSmooth;
+      if (nodState === "idle") {
+        nodBaseline = nodBaseline === null ? pitch : 0.05 * pitch + 0.95 * nodBaseline;
+        if (now >= nodCooldownUntil && nodSmooth > nodBaseline + 0.08) {
+          nodState = "armed";
+          nodAt = now;
+          nodRef = nodBaseline;
+          nodPeak = nodSmooth;
+        }
+      } else {
+        if (nodSmooth > nodPeak) nodPeak = nodSmooth;
+        const timedOut = now - nodAt > 1200;
+        const complete = nodPeak > nodRef + 0.05 && nodPeak - nodSmooth > 0.058;
+        if (complete) {
+          confirmSelection();
+          nodState = "idle";
+          nodCooldownUntil = now + 320;
+          nodBaseline = nodSmooth;
+        } else if (timedOut) {
+          nodState = "idle";
+          nodCooldownUntil = now + 240;
+        }
+      }
+    };
 
     const hands = new HandsCtor({
       locateFile: (file) => `${MEDIAPIPE_HANDS_BASE}${file}`,
     });
     hands.setOptions({
-      maxNumHands: 2,
+      maxNumHands: 1,
       modelComplexity: 1,
       minDetectionConfidence: 0.65,
-      minTrackingConfidence: 0.65,
+      minTrackingConfidence: 0.6,
     });
-
     hands.onResults((results) => {
       if (disposed) return;
-      latestHands.r = results;
-      setHandCount(results.multiHandLandmarks?.length ?? 0);
+      const lm = results.multiHandLandmarks?.[0] ?? null;
+      const handed = results.multiHandedness?.[0]?.label ?? null;
+      latestPrimary.hand = lm;
+      latestPrimary.handedness = handed;
+      setHandsSeen(results.multiHandLandmarks?.length ?? 0);
 
-      updateButtonHoverFromHands(results);
-      detectForwardPokeClick(results);
-      detectHandGestures(results.multiHandLandmarks);
-
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const primary = results.multiHandLandmarks?.[0];
-      if (!primary || !vw || !vh) {
-        setPointerHud(null);
-        pointerOverButtonRef.current = false;
-        setButtonHovered((prev) => (prev ? false : prev));
-      } else {
-        const cw = container.clientWidth;
-        const ch = container.clientHeight;
-        const tipCanvas = normalizedToCanvas(
-          primary[INDEX_FINGER_TIP],
-          vw,
-          vh,
-          cw,
-          ch,
-        );
-        const raw = canvasPointToClient(
-          container,
-          cw,
-          ch,
-          tipCanvas.x,
-          tipCanvas.y,
-        );
-        const rect = container.getBoundingClientRect();
-        setPointerHud({
-          clientX: Math.round(mirrorClientXInRect(rect, raw.clientX)),
-          clientY: Math.round(raw.clientY),
-          handedness: results.multiHandedness?.[0]?.label ?? "—",
-        });
+      const now = performance.now();
+      if (!lm) {
+        maybeFinalizeStroke(now);
+        drawOverlay();
+        return;
       }
 
-      paint();
+      const open = isOpenPalm(lm);
+      const side = palmFacing(lm);
+      if (open && side === "palm" && pendingFieldRef.current !== "username") {
+        setPendingField("username");
+        setStatus("Open palm detected: nod to confirm USERNAME field.");
+      } else if (open && side === "back" && pendingFieldRef.current !== "password") {
+        setPendingField("password");
+        setStatus("Back of hand detected: nod to confirm PASSWORD field.");
+      }
+
+      if (activeFieldRef.current && isPointingPose(lm)) {
+        stroke.push({ x: lm[INDEX_TIP].x, y: lm[INDEX_TIP].y });
+        if (stroke.length > 180) stroke.shift();
+        lastStrokeAt = now;
+        setIsWriting(true);
+      } else {
+        maybeFinalizeStroke(now);
+      }
+      drawOverlay();
     });
 
     const faceMesh = new FaceMeshCtor({
@@ -611,14 +421,10 @@ export default function App() {
       minDetectionConfidence: 0.5,
       minTrackingConfidence: 0.5,
     });
-
     faceMesh.onResults((results) => {
       if (disposed) return;
-      const fl = results.multiFaceLandmarks?.[0] ?? null;
-      latestFace.r = fl;
-      setFaceCount(results.multiFaceLandmarks?.length ?? 0);
-      if (fl) detectNodShake(fl);
-      paint();
+      const lm = results.multiFaceLandmarks?.[0];
+      if (lm) detectNod(lm);
     });
 
     const camera = new CameraCtor(video, {
@@ -632,8 +438,8 @@ export default function App() {
       facingMode: "user",
     });
 
-    camera.start().catch((err) => {
-      console.error("Camera error:", err);
+    camera.start().catch(() => {
+      setStatus("Unable to access camera. Allow webcam permission and refresh.");
     });
 
     return () => {
@@ -645,108 +451,58 @@ export default function App() {
   }, []);
 
   return (
-    <div className="hand-test">
-      <h1>Hand &amp; face gestures</h1>
+    <main className="nyoui-screen">
+      <div className="ambient ambient--one" />
+      <div className="ambient ambient--two" />
+      <div className="ambient ambient--three" />
 
-      <p className="hand-test__lede">
-        Mirrored camera, MediaPipe Hands + Face Mesh. Center button: point to
-        hover; nod, thumbs up, or push index forward (depth) to click (+1). Mouse
-        too. Action log below.
-      </p>
+      <section className="login-card">
+        <h1 className="brand">
+          Ny<span>o</span>UI
+        </h1>
 
-      <div className="hand-test__camera-card">
-        <div className="hand-test__stage-header">
-          <label className="hand-test__name-label" htmlFor="user-name">
-            Name
+        <div className="fields">
+          <label className={activeField === "username" ? "field active" : "field"}>
+            <span>Username</span>
+            <input
+              ref={userRef}
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value.toUpperCase().slice(0, MAX_FIELD_LENGTH))}
+              placeholder="AIR-WRITE USERNAME"
+            />
           </label>
-          <input
-            id="user-name"
-            className="hand-test__name-input"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="User"
-            autoComplete="name"
-            maxLength={48}
-          />
+
+          <label className={activeField === "password" ? "field active" : "field"}>
+            <span>Password</span>
+            <input
+              ref={passRef}
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value.toUpperCase().slice(0, MAX_FIELD_LENGTH))}
+              placeholder="AIR-WRITE PASSWORD"
+            />
+          </label>
         </div>
 
-        <div
-          ref={containerRef}
-          className="hand-test__stage"
-          aria-label="Camera, face mesh, and hand overlay"
-        >
-          <div className="hand-test__mirror">
-            <video
-              ref={videoRef}
-              className="hand-test__video"
-              autoPlay
-              playsInline
-              muted
-            />
-            <canvas
-              ref={canvasRef}
-              className="hand-test__canvas"
-              aria-hidden
-            />
-          </div>
-          <div className="hand-test__stage-ui">
-            <button
-              type="button"
-              ref={buttonRef}
-              className={
-                buttonHovered
-                  ? "hand-test__click-btn hand-test__click-btn--hover"
-                  : "hand-test__click-btn"
-              }
-              onClick={() => setClickCount((c) => c + 1)}
-            >
-              click me ({clickCount})
-            </button>
-          </div>
+        <div className="actions">
+          <button type="button">SIGN UP</button>
+          <button type="button">LOGIN</button>
         </div>
-      </div>
 
-      <div className="hand-test__hud">
-        <span>Hands: {handCount}</span>
-        <span>Face: {faceCount}</span>
-        {pointerHud ? (
-          <span>
-            Pointer ({pointerHud.handedness}):{" "}
-            <code>
-              {pointerHud.clientX}, {pointerHud.clientY}
-            </code>
-          </span>
-        ) : (
-          <span>Show a hand for index tip</span>
-        )}
-      </div>
-
-      <section className="hand-test__actions-section" aria-label="Action log">
-        <h2 className="hand-test__actions-title">
-          Actions
-          <span className="hand-test__actions-count">
-            {actions.length} recorded
-          </span>
-        </h2>
-        <ul className="hand-test__actions">
-          {actions.length === 0 ? (
-            <li className="hand-test__actions-empty">No actions yet.</li>
-          ) : (
-            actions.map((entry) => (
-              <li key={entry.id} className="hand-test__actions-item">
-                <span
-                  className="hand-test__actions-num"
-                  title="Running count (newest = highest)"
-                >
-                  {entry.id}
-                </span>
-                <span className="hand-test__actions-text">{entry.text}</span>
-              </li>
-            ))
-          )}
-        </ul>
+        <p className="status">{status}</p>
+        <p className="meta">
+          {handsSeen > 0 ? "Hand tracked" : "Waiting for hand"} |{" "}
+          {pendingField ? `pending: ${pendingField}` : `active: ${activeField ?? "none"}`}
+          {isWriting ? " | writing..." : ""}
+          {recognizedChar ? ` | detected: ${recognizedChar}` : ""}
+        </p>
       </section>
-    </div>
+
+      <div className="camera-pane" aria-label="Gesture camera">
+        <video ref={videoRef} autoPlay playsInline muted />
+        <canvas ref={canvasRef} />
+      </div>
+    </main>
   );
 }

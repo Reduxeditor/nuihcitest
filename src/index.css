@@ -331,3 +331,18 @@ code {
 .hand-test__hud code {
   font-size: 14px;
 }
+
+/* App-level reset for custom login interface */
+body {
+  margin: 0;
+}
+
+#root {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  min-height: 100vh;
+  border: none;
+  display: block;
+  text-align: initial;
+}
