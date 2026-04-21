@@ -15,101 +15,10 @@ const MEDIAPIPE_FACE_MESH_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/";
 
 const INDEX_TIP = 8;
-const CHAR_SETTLE_MS = 540;
-const MIN_STROKE_POINTS = 10;
-const MIN_STROKE_LENGTH = 0.26;
 const MAX_FIELD_LENGTH = 24;
-
-const ALPHANUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 const ADMIN_USER = "OLDBUTGOLD";
 const ADMIN_PASS = "admin";
-
-function dist(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function pathLength(points) {
-  let sum = 0;
-  for (let i = 1; i < points.length; i += 1) sum += dist(points[i - 1], points[i]);
-  return sum;
-}
-
-function resample(points, n) {
-  const D = pathLength(points);
-  if (D <= 0 || points.length === 0) return points.slice();
-  const I = D / (n - 1);
-  let d = 0;
-  const out = [points[0]];
-  const work = points.map((p) => ({ ...p }));
-  let i = 1;
-  while (i < work.length) {
-    const cur = work[i - 1];
-    const next = work[i];
-    const seg = dist(cur, next);
-    if (d + seg >= I) {
-      const t = (I - d) / seg;
-      const q = {
-        x: cur.x + t * (next.x - cur.x),
-        y: cur.y + t * (next.y - cur.y),
-      };
-      out.push(q);
-      work.splice(i, 0, q);
-      d = 0;
-    } else {
-      d += seg;
-      i += 1;
-    }
-  }
-  while (out.length < n) out.push({ ...out[out.length - 1] });
-  return out;
-}
-
-function normalize(points) {
-  const xs = points.map((p) => p.x);
-  const ys = points.map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const w = Math.max(0.001, maxX - minX);
-  const h = Math.max(0.001, maxY - minY);
-  return points.map((p) => ({ x: (p.x - minX) / w, y: (p.y - minY) / h }));
-}
-
-function to8Dir(a, b) {
-  const angle = Math.atan2(b.y - a.y, b.x - a.x);
-  const bin = Math.round((angle / (Math.PI / 4) + 8)) % 8;
-  return bin;
-}
-
-function directions(points) {
-  const dirs = [];
-  for (let i = 1; i < points.length; i += 1) {
-    const d = to8Dir(points[i - 1], points[i]);
-    if (dirs.length === 0 || dirs[dirs.length - 1] !== d) dirs.push(d);
-  }
-  return dirs;
-}
-
-function weightedEditDistance(a, b) {
-  const dp = Array.from({ length: a.length + 1 }, () =>
-    Array.from({ length: b.length + 1 }, () => 0),
-  );
-  for (let i = 0; i <= a.length; i += 1) dp[i][0] = i;
-  for (let j = 0; j <= b.length; j += 1) dp[0][j] = j;
-  for (let i = 1; i <= a.length; i += 1) {
-    for (let j = 1; j <= b.length; j += 1) {
-      const subCost = Math.min(Math.abs(a[i - 1] - b[j - 1]), 8 - Math.abs(a[i - 1] - b[j - 1])) / 2;
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + subCost,
-      );
-    }
-  }
-  return dp[a.length][b.length];
-}
 
 function isFingerExtended(lm, tip, pip) {
   const w = lm[0];
@@ -178,6 +87,23 @@ function isThumbsUp(lm) {
   return thumbExtendedUp && thumbSeparated && indexCurled && middleCurled && ringCurled && pinkyCurled;
 }
 
+function isPointingAtMouth(handLm, faceLm) {
+  if (!handLm || !faceLm) return false;
+  const backOfHand = palmFacing(handLm) === "back";
+  const indexExtended = isFingerExtended(handLm, 8, 6);
+  const middleCurled = isFingerCurled(handLm, 12, 10);
+  const ringCurled = isFingerCurled(handLm, 16, 14);
+  const pinkyCurled = isFingerCurled(handLm, 20, 18);
+
+  const lowerLip = faceLm[17];
+  const indexTip = handLm[8];
+  const distToMouth = Math.hypot(indexTip.x - lowerLip.x, indexTip.y - lowerLip.y);
+  const nearMouth = distToMouth < 0.12;
+  const fingerAboveMouth = indexTip.y < lowerLip.y;
+
+  return backOfHand && indexExtended && middleCurled && ringCurled && pinkyCurled && nearMouth && fingerAboveMouth;
+}
+
 function facePitch(lm) {
   const nose = lm[1];
   const le = lm[33];
@@ -185,60 +111,6 @@ function facePitch(lm) {
   const eyeMidY = (le.y + re.y) / 2;
   const scale = Math.max(0.04, Math.hypot(re.x - le.x, re.y - le.y));
   return (nose.y - eyeMidY) / scale;
-}
-
-const CHAR_TEMPLATES = {
-  A: "24602024",
-  B: "0602424642",
-  C: "2460",
-  D: "06420",
-  E: "242424",
-  F: "2424",
-  G: "246020",
-  H: "20242",
-  I: "202",
-  J: "66042",
-  K: "20464",
-  L: "20",
-  M: "24202",
-  N: "2420",
-  O: "2460",
-  P: "0642",
-  Q: "24606",
-  R: "06426",
-  S: "6060",
-  T: "220",
-  U: "042",
-  V: "042",
-  W: "04042",
-  X: "4646",
-  Y: "640",
-  Z: "2620",
-  0: "2460",
-  1: "0",
-  2: "2620",
-  3: "6660",
-  4: "402",
-  5: "24260",
-  6: "246042",
-  7: "20",
-  8: "24602460",
-  9: "246020",
-};
-
-function recognizeAlnum(stroke) {
-  const simplified = normalize(resample(stroke, 24));
-  const dirs = directions(simplified);
-  if (dirs.length === 0) return null;
-  let best = { ch: null, score: Number.POSITIVE_INFINITY };
-  for (const ch of ALPHANUM) {
-    const tpl = CHAR_TEMPLATES[ch];
-    if (!tpl) continue;
-    const arr = tpl.split("").map((d) => Number(d));
-    const score = weightedEditDistance(dirs, arr);
-    if (score < best.score) best = { ch, score };
-  }
-  return best.score <= 7 ? best.ch : null;
 }
 
 export default function App() {
@@ -253,12 +125,19 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [activeField, setActiveField] = useState(null);
   const [pendingField, setPendingField] = useState(null);
-  const [status, setStatus] = useState("Controls: Point with one hand to move cursor. Thumbs up with other hand to click.");
+  const [status, setStatus] = useState("Controls: Point to move, thumbs up = click, point at mouth = speech.");
   const [handsSeen, setHandsSeen] = useState(0);
-  const [recognizedChar, setRecognizedChar] = useState("");
-  const [isWriting, setIsWriting] = useState(false);
   const [cursorPos, setCursorPos] = useState({ x: 50, y: 50 });
   const [isClicking, setIsClicking] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+
+  const recognitionRef = useRef(null);
+  const mouthGestureRef = useRef({ active: false, since: 0 });
+  const isListeningRef = useRef(false);
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
 
   activeFieldRef.current = activeField;
   pendingFieldRef.current = pendingField;
@@ -290,36 +169,8 @@ export default function App() {
 
     const latestPrimary = { hand: null, handedness: null };
     let secondaryHand = null;
-    let stroke = [];
-    let lastStrokeAt = 0;
     let clickCooldownUntil = 0;
-
-    const commitChar = (ch) => {
-      if (!ch) return;
-      setRecognizedChar(ch);
-      setTimeout(() => setRecognizedChar(""), 700);
-      const targetField = activeFieldRef.current;
-      if (targetField === "username") {
-        setUsername((prev) => (prev + ch).slice(0, MAX_FIELD_LENGTH));
-      } else if (targetField === "password") {
-        setPassword((prev) => (prev + ch).slice(0, MAX_FIELD_LENGTH));
-      }
-    };
-
-    const maybeFinalizeStroke = (now) => {
-      if (stroke.length < MIN_STROKE_POINTS) return;
-      if (now - lastStrokeAt < CHAR_SETTLE_MS) return;
-      const len = pathLength(stroke);
-      if (len < MIN_STROKE_LENGTH) {
-        stroke = [];
-        setIsWriting(false);
-        return;
-      }
-      const ch = recognizeAlnum(stroke);
-      commitChar(ch);
-      stroke = [];
-      setIsWriting(false);
-    };
+    let latestFaceLm = null;
 
     const drawOverlay = () => {
       if (disposed) return;
@@ -330,21 +181,48 @@ export default function App() {
         canvas.height = ch;
       }
       ctx.clearRect(0, 0, cw, ch);
-      ctx.save();
-      ctx.scale(-1, 1);
-      ctx.translate(-cw, 0);
-      if (stroke.length > 1) {
-        ctx.strokeStyle = "rgba(129, 140, 248, 0.95)";
-        ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.moveTo(stroke[0].x * cw, stroke[0].y * ch);
-        for (let i = 1; i < stroke.length; i += 1) {
-          ctx.lineTo(stroke[i].x * cw, stroke[i].y * ch);
-        }
-        ctx.stroke();
-      }
-      ctx.restore();
     };
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = true;
+      recognitionRef.current.interimResults = true;
+      recognitionRef.current.lang = "en-US";
+
+      recognitionRef.current.onstart = () => {
+        setIsListening(true);
+        setStatus("Listening... Speak now.");
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current.onresult = (event) => {
+        const results = event.results;
+        if (results.length > 0) {
+          const lastResult = results[results.length - 1];
+          const text = lastResult[0].transcript;
+          if (lastResult.isFinal && activeFieldRef.current) {
+            const field = activeFieldRef.current;
+            const cleanText = text.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+            if (field === "username") {
+              setUsername((prev) => (prev + cleanText).slice(0, MAX_FIELD_LENGTH));
+            } else if (field === "password") {
+              setPassword((prev) => (prev + cleanText).slice(0, MAX_FIELD_LENGTH));
+            }
+            setStatus(`Speech recognized: "${cleanText}"`);
+          }
+        }
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        if (event.error !== "aborted") {
+          setIsListening(false);
+        }
+      };
+    }
 
     const confirmSelection = () => {
       const field = pendingFieldRef.current;
@@ -352,8 +230,8 @@ export default function App() {
       setActiveField(field);
       setStatus(
         field === "username"
-          ? "Username active. Point to write. Thumbs up = click."
-          : "Password active. Point to write. Thumbs up = click.",
+          ? "Username active. Click or point at mouth to speak."
+          : "Password active. Click or point at mouth to speak.",
       );
       if (field === "username") userRef.current?.focus();
       if (field === "password") passRef.current?.focus();
@@ -423,11 +301,22 @@ export default function App() {
         const tipX = 1 - pointingHand[INDEX_TIP].x;
         const tipY = pointingHand[INDEX_TIP].y;
         setCursorPos({ x: tipX * 100, y: tipY * 100 });
-        if (activeFieldRef.current) {
-          stroke.push({ x: tipX, y: tipY });
-          if (stroke.length > 180) stroke.shift();
-          lastStrokeAt = now;
-          setIsWriting(true);
+
+        const mouthPointing = activeFieldRef.current && latestFaceLm && isPointingAtMouth(pointingHand, latestFaceLm);
+        if (mouthPointing) {
+          if (!mouthGestureRef.current.active) {
+            mouthGestureRef.current = { active: true, since: now };
+            if (recognitionRef.current && !isListeningRef.current) {
+              try { recognitionRef.current.start(); } catch {}
+            }
+          }
+        } else {
+          if (mouthGestureRef.current.active) {
+            mouthGestureRef.current = { active: false, since: 0 };
+            if (recognitionRef.current && isListeningRef.current) {
+              try { recognitionRef.current.stop(); } catch {}
+            }
+          }
         }
 
         if (clickHand && now >= clickCooldownUntil) {
@@ -465,8 +354,6 @@ export default function App() {
             setStatus(`Clicked: ${element.tagName.toLowerCase()}${element.id ? "#" + element.id : ""}`);
           }
         }
-      } else {
-        maybeFinalizeStroke(now);
       }
 
       if (!pointingHand && handsCount > 0) {
@@ -497,7 +384,10 @@ export default function App() {
     faceMesh.onResults((results) => {
       if (disposed) return;
       const lm = results.multiFaceLandmarks?.[0];
-      if (lm) detectNod(lm);
+      if (lm) {
+        latestFaceLm = lm;
+        detectNod(lm);
+      }
     });
 
     const camera = new CameraCtor(video, {
@@ -520,6 +410,10 @@ export default function App() {
       camera.stop();
       hands.close();
       faceMesh.close();
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+        recognitionRef.current = null;
+      }
     };
   }, []);
 
@@ -542,7 +436,7 @@ export default function App() {
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value.toUpperCase().slice(0, MAX_FIELD_LENGTH))}
-              placeholder="AIR-WRITE USERNAME"
+              placeholder="SPEECH OR TYPE USERNAME"
             />
           </label>
 
@@ -553,7 +447,7 @@ export default function App() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value.slice(0, MAX_FIELD_LENGTH))}
-              placeholder="AIR-WRITE PASSWORD"
+              placeholder="SPEECH OR TYPE PASSWORD"
             />
           </label>
         </div>
@@ -567,9 +461,8 @@ export default function App() {
         <p className="meta">
           {handsSeen > 0 ? `${handsSeen} hand${handsSeen > 1 ? "s" : ""} tracked` : "Waiting for hands"} |{" "}
           {pendingField ? `pending: ${pendingField}` : `active: ${activeField ?? "none"}`}
-          {isWriting ? " | writing..." : ""}
+          {isListening ? " | SPEECH..." : ""}
           {isClicking ? " | CLICK!" : ""}
-          {recognizedChar ? ` | detected: ${recognizedChar}` : ""}
         </p>
       </section>
 
@@ -579,11 +472,11 @@ export default function App() {
       </div>
 
       <div
-        className={`cursor-follower${isClicking ? " clicking" : ""}`}
+        className={`cursor-follower${isClicking ? " clicking" : ""}${isListening ? " listening" : ""}`}
         style={{
           left: `${cursorPos.x}%`,
           top: `${cursorPos.y}%`,
-          opacity: handsSeen > 0 && isWriting ? 1 : handsSeen > 0 ? 0.7 : 0,
+          opacity: handsSeen > 0 ? 0.85 : 0,
         }}
       />
     </main>
