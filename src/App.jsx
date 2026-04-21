@@ -76,32 +76,25 @@ function isThumbsUp(lm) {
   const thumbMcp = lm[2];
   const indexMcp = lm[5];
 
-  const thumbExtendedUp = thumbTip.y < thumbIp.y - 0.04 && thumbTip.y < thumbMcp.y - 0.02;
-  const thumbSeparated = Math.abs(thumbTip.x - indexMcp.x) > 0.03;
+  const thumbExtendedUp = thumbTip.y < thumbIp.y - 0.02 && thumbTip.y < thumbMcp.y - 0.01;
+  const thumbSeparated = Math.abs(thumbTip.x - indexMcp.x) > 0.02;
 
-  const indexCurled = lm[8].y > lm[6].y + 0.02;
-  const middleCurled = lm[12].y > lm[10].y + 0.02;
-  const ringCurled = lm[16].y > lm[14].y + 0.02;
-  const pinkyCurled = lm[20].y > lm[18].y + 0.02;
+  const indexCurled = lm[8].y > lm[6].y;
+  const middleCurled = lm[12].y > lm[10].y;
+  const ringCurled = lm[16].y > lm[14].y;
+  const pinkyCurled = lm[20].y > lm[18].y;
 
   return thumbExtendedUp && thumbSeparated && indexCurled && middleCurled && ringCurled && pinkyCurled;
 }
 
-function isPointingAtMouth(handLm, faceLm) {
-  if (!handLm || !faceLm) return false;
-  const backOfHand = palmFacing(handLm) === "back";
-  const indexExtended = isFingerExtended(handLm, 8, 6);
-  const middleCurled = isFingerCurled(handLm, 12, 10);
-  const ringCurled = isFingerCurled(handLm, 16, 14);
-  const pinkyCurled = isFingerCurled(handLm, 20, 18);
-
-  const lowerLip = faceLm[17];
-  const indexTip = handLm[8];
-  const distToMouth = Math.hypot(indexTip.x - lowerLip.x, indexTip.y - lowerLip.y);
-  const nearMouth = distToMouth < 0.12;
-  const fingerAboveMouth = indexTip.y < lowerLip.y;
-
-  return backOfHand && indexExtended && middleCurled && ringCurled && pinkyCurled && nearMouth && fingerAboveMouth;
+function isIndexPointingUp(lm) {
+  const indexTip = lm[8];
+  const indexPip = lm[6];
+  const indexPointingUp = indexTip.y < indexPip.y - 0.05;
+  const middleCurled = isFingerCurled(lm, 12, 10);
+  const ringCurled = isFingerCurled(lm, 16, 14);
+  const pinkyCurled = isFingerCurled(lm, 20, 18);
+  return indexPointingUp && middleCurled && ringCurled && pinkyCurled;
 }
 
 function facePitch(lm) {
@@ -120,12 +113,14 @@ export default function App() {
   const passRef = useRef(null);
   const activeFieldRef = useRef(null);
   const pendingFieldRef = useRef(null);
+  const usernameRef = useRef("");
+  const passwordRef = useRef("");
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [activeField, setActiveField] = useState(null);
   const [pendingField, setPendingField] = useState(null);
-  const [status, setStatus] = useState("Controls: Point to move, thumbs up = click, point at mouth = speech.");
+  const [status, setStatus] = useState("Controls: Point to move, index up = speech, two open palms = delete, one thumb up = click, two thumbs up = login.");
   const [handsSeen, setHandsSeen] = useState(0);
   const [cursorPos, setCursorPos] = useState({ x: 50, y: 50 });
   const [isClicking, setIsClicking] = useState(false);
@@ -139,14 +134,22 @@ export default function App() {
     isListeningRef.current = isListening;
   }, [isListening]);
 
+  useEffect(() => {
+    usernameRef.current = username;
+  }, [username]);
+
+  useEffect(() => {
+    passwordRef.current = password;
+  }, [password]);
+
   activeFieldRef.current = activeField;
   pendingFieldRef.current = pendingField;
 
   const handleLogin = () => {
-    if (username.toUpperCase() === ADMIN_USER && password === ADMIN_PASS) {
+    if (usernameRef.current.toUpperCase() === ADMIN_USER && passwordRef.current.toLowerCase() === ADMIN_PASS) {
       setStatus("Login successful! Welcome, admin.");
     } else {
-      setStatus("Invalid credentials. Try: OldButGold / admin");
+      setStatus("User not found. Would you like to sign up?");
     }
   };
 
@@ -206,10 +209,12 @@ export default function App() {
           const text = lastResult[0].transcript;
           if (lastResult.isFinal && activeFieldRef.current) {
             const field = activeFieldRef.current;
-            const cleanText = text.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+            let cleanText = "";
             if (field === "username") {
+              cleanText = text.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
               setUsername((prev) => (prev + cleanText).slice(0, MAX_FIELD_LENGTH));
             } else if (field === "password") {
+              cleanText = text.trim().replace(/[^a-zA-Z0-9]/g, "");
               setPassword((prev) => (prev + cleanText).slice(0, MAX_FIELD_LENGTH));
             }
             setStatus(`Speech recognized: "${cleanText}"`);
@@ -230,8 +235,8 @@ export default function App() {
       setActiveField(field);
       setStatus(
         field === "username"
-          ? "Username active. Click or point at mouth to speak."
-          : "Password active. Click or point at mouth to speak.",
+          ? "Username active. Click, index up to speak, two palms to delete, or two thumbs up to login."
+          : "Password active. Click, index up to speak, two palms to delete, or two thumbs up to login.",
       );
       if (field === "username") userRef.current?.focus();
       if (field === "password") passRef.current?.focus();
@@ -284,6 +289,7 @@ export default function App() {
 
       let pointingHand = null;
       let clickHand = null;
+      let thumbsUpCount = 0;
 
       for (let i = 0; i < handsCount; i++) {
         const lm = results.multiHandLandmarks[i];
@@ -291,6 +297,7 @@ export default function App() {
           pointingHand = lm;
         } else if (isThumbsUp(lm)) {
           clickHand = lm;
+          thumbsUpCount += 1;
         }
       }
 
@@ -302,8 +309,8 @@ export default function App() {
         const tipY = pointingHand[INDEX_TIP].y;
         setCursorPos({ x: tipX * 100, y: tipY * 100 });
 
-        const mouthPointing = activeFieldRef.current && latestFaceLm && isPointingAtMouth(pointingHand, latestFaceLm);
-        if (mouthPointing) {
+        const speechGesture = activeFieldRef.current && isIndexPointingUp(pointingHand);
+        if (speechGesture) {
           if (!mouthGestureRef.current.active) {
             mouthGestureRef.current = { active: true, since: now };
             if (recognitionRef.current && !isListeningRef.current) {
@@ -356,16 +363,46 @@ export default function App() {
         }
       }
 
-      if (!pointingHand && handsCount > 0) {
-        const lm = results.multiHandLandmarks[0];
-        const open = isOpenPalm(lm);
-        const side = palmFacing(lm);
-        if (open && side === "palm" && pendingFieldRef.current !== "username") {
-          setPendingField("username");
-          setStatus("Open palm = Username field. Nod to confirm.");
-        } else if (open && side === "back" && pendingFieldRef.current !== "password") {
-          setPendingField("password");
-          setStatus("Back of hand = Password field. Nod to confirm.");
+      const twoOpenPalmsFacingCamera = handsCount === 2 &&
+        results.multiHandLandmarks.every((lm) => isOpenPalm(lm) && palmFacing(lm) === "palm");
+
+      if (twoOpenPalmsFacingCamera && activeFieldRef.current && now >= clickCooldownUntil) {
+        clickCooldownUntil = now + 400;
+        const field = activeFieldRef.current;
+        if (field === "username") {
+          setUsername((prev) => prev.slice(0, -1));
+          setStatus("Deleted last character from username");
+        } else if (field === "password") {
+          setPassword((prev) => prev.slice(0, -1));
+          setStatus("Deleted last character from password");
+        }
+      }
+
+      if (thumbsUpCount === 2 && now >= clickCooldownUntil) {
+        clickCooldownUntil = now + 600;
+        setIsClicking(true);
+        setTimeout(() => setIsClicking(false), 300);
+        handleLogin();
+      }
+
+      if (!pointingHand) {
+        if (mouthGestureRef.current.active) {
+          mouthGestureRef.current = { active: false, since: 0 };
+          if (recognitionRef.current && isListeningRef.current) {
+            try { recognitionRef.current.stop(); } catch {}
+          }
+        }
+        if (handsCount > 0) {
+          const lm = results.multiHandLandmarks[0];
+          const open = isOpenPalm(lm);
+          const side = palmFacing(lm);
+          if (open && side === "palm" && pendingFieldRef.current !== "username") {
+            setPendingField("username");
+            setStatus("Open palm = Username field. Nod to confirm.");
+          } else if (open && side === "back" && pendingFieldRef.current !== "password") {
+            setPendingField("password");
+            setStatus("Back of hand = Password field. Nod to confirm.");
+          }
         }
       }
 
@@ -435,7 +472,8 @@ export default function App() {
               ref={userRef}
               type="text"
               value={username}
-              onChange={(e) => setUsername(e.target.value.toUpperCase().slice(0, MAX_FIELD_LENGTH))}
+              onChange={(e) => setUsername(e.target.value.slice(0, MAX_FIELD_LENGTH))}
+              onClick={() => { setActiveField("username"); setPendingField(null); setStatus("Username active. Click, index up to speak, two palms to delete, or two thumbs up to login."); }}
               placeholder="SPEECH OR TYPE USERNAME"
             />
           </label>
@@ -447,6 +485,7 @@ export default function App() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value.slice(0, MAX_FIELD_LENGTH))}
+              onClick={() => { setActiveField("password"); setPendingField(null); setStatus("Password active. Click, index up to speak, two palms to delete, or two thumbs up to login."); }}
               placeholder="SPEECH OR TYPE PASSWORD"
             />
           </label>

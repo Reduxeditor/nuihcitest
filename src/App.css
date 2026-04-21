@@ -108,15 +108,17 @@
 }
 
 .actions button {
-  border: 3px solid rgba(255, 255, 255, 0.88);
+  border: 4px solid rgba(255, 255, 255, 0.9);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 800;
-  letter-spacing: 0.03em;
-  padding: 12px 24px;
+  letter-spacing: 0.04em;
+  padding: 18px 36px;
   cursor: pointer;
+  min-height: 64px;
+  width: 100%;
 }
 
 .actions button:hover {
@@ -166,7 +168,9 @@
 
 @media (max-width: 780px) {
   .actions button {
-    font-size: 19px;
+    font-size: 22px;
+    padding: 14px 28px;
+    min-height: 56px;
   }
 
   .camera-pane {
