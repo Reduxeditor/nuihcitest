@@ -210,7 +210,9 @@ export default function App() {
   pendingFieldRef.current = pendingField;
 
   const handleLogin = () => {
-    if (usernameRef.current.toUpperCase() === ADMIN_USER && passwordRef.current.toLowerCase() === ADMIN_PASS) {
+    const currentUsername = (username || usernameRef.current || "").trim();
+    const currentPassword = (password || passwordRef.current || "").trim();
+    if (currentUsername.toUpperCase() === ADMIN_USER && currentPassword.toLowerCase() === ADMIN_PASS) {
       setStatus("Login successful! Welcome, admin.");
       setIsLoggedIn(true);
       setNotifications((prev) => [`${getTimeGreeting()} You logged in successfully.`, ...prev]);
@@ -813,7 +815,11 @@ export default function App() {
                 ref={userRef}
                 type="text"
                 value={username}
-                onChange={(e) => setUsername(e.target.value.slice(0, MAX_FIELD_LENGTH))}
+                onChange={(e) => {
+                  const next = e.target.value.slice(0, MAX_FIELD_LENGTH);
+                  setUsername(next);
+                  usernameRef.current = next;
+                }}
                 onClick={() => { setActiveField("username"); setPendingField(null); setStatus("Username active. Click, index up to speak, two palms to delete, or two thumbs up to login."); }}
                 placeholder="SPEECH OR TYPE USERNAME"
               />
@@ -825,7 +831,11 @@ export default function App() {
                 ref={passRef}
                 type="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value.slice(0, MAX_FIELD_LENGTH))}
+                onChange={(e) => {
+                  const next = e.target.value.slice(0, MAX_FIELD_LENGTH);
+                  setPassword(next);
+                  passwordRef.current = next;
+                }}
                 onClick={() => { setActiveField("password"); setPendingField(null); setStatus("Password active. Click, index up to speak, two palms to delete, or two thumbs up to login."); }}
                 placeholder="SPEECH OR TYPE PASSWORD"
               />
