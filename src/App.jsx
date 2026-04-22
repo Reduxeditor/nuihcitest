@@ -20,6 +20,13 @@ const MAX_FIELD_LENGTH = 24;
 const ADMIN_USER = "OLDBUTGOLD";
 const ADMIN_PASS = "admin";
 
+function getTimeGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good Morning!";
+  if (hour < 18) return "Good Afternoon!";
+  return "Good Evening!";
+}
+
 function isFingerExtended(lm, tip, pip) {
   const w = lm[0];
   const dTip = Math.hypot(lm[tip].x - w.x, lm[tip].y - w.y);
@@ -128,14 +135,68 @@ export default function App() {
   const [showCamera, setShowCamera] = useState(true);
   const [showGuide, setShowGuide] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [profile, setProfile] = useState({
+    picture: "https://via.placeholder.com/84x84.png?text=U",
+    name: "Admin User",
+    biography: "Welcome to NyoUI messaging dashboard.",
+    status: "Online",
+  });
+  const [notifications, setNotifications] = useState([
+    "Welcome back! Your dashboard is ready.",
+    "Tip: You can use controls for gesture input and speech.",
+  ]);
+  const [newFriendName, setNewFriendName] = useState("");
+  const [friends, setFriends] = useState(["Ava", "Noah", "Mia"]);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [chatMessage, setChatMessage] = useState("");
+  const [activeConversationId, setActiveConversationId] = useState("private-Ava");
+  const [conversations, setConversations] = useState([
+    {
+      id: "private-Ava",
+      type: "private",
+      title: "Private: Ava",
+      participants: ["You", "Ava"],
+      messages: [
+        { id: "m1", sender: "Ava", text: "Hi! Ready to chat?", time: new Date().toLocaleTimeString() },
+      ],
+    },
+    {
+      id: "group-team",
+      type: "group",
+      title: "Group: Team",
+      participants: ["You", "Ava", "Noah"],
+      messages: [
+        { id: "m2", sender: "Noah", text: "Let us sync at 3 PM.", time: new Date().toLocaleTimeString() },
+      ],
+    },
+  ]);
 
   const recognitionRef = useRef(null);
   const mouthGestureRef = useRef({ active: false, since: 0 });
   const isListeningRef = useRef(false);
+  const ttsEnabledRef = useRef(ttsEnabled);
+
+  const speak = (text) => {
+    if (!ttsEnabledRef.current || !window.speechSynthesis) return;
+    try {
+      const msg = new SpeechSynthesisUtterance(text);
+      msg.lang = "en-US";
+      msg.rate = 1;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(msg);
+    } catch {
+      // Ignore browser TTS errors silently.
+    }
+  };
 
   useEffect(() => {
     isListeningRef.current = isListening;
   }, [isListening]);
+
+  useEffect(() => {
+    ttsEnabledRef.current = ttsEnabled;
+  }, [ttsEnabled]);
 
   useEffect(() => {
     usernameRef.current = username;
@@ -152,6 +213,8 @@ export default function App() {
     if (usernameRef.current.toUpperCase() === ADMIN_USER && passwordRef.current.toLowerCase() === ADMIN_PASS) {
       setStatus("Login successful! Welcome, admin.");
       setIsLoggedIn(true);
+      setNotifications((prev) => [`${getTimeGreeting()} You logged in successfully.`, ...prev]);
+      speak(`${getTimeGreeting()} Welcome to your messaging dashboard.`);
     } else {
       setStatus("User not found. Would you like to sign up?");
     }
@@ -165,6 +228,93 @@ export default function App() {
     setPendingField(null);
     setStatus("Logged out.");
   };
+
+  const updateProfileField = (key, value) => {
+    setProfile((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const addFriend = () => {
+    const clean = newFriendName.trim();
+    if (!clean) return;
+    if (friends.some((friend) => friend.toLowerCase() === clean.toLowerCase())) {
+      setStatus(`${clean} is already in your friends list.`);
+      return;
+    }
+    setFriends((prev) => [...prev, clean]);
+    setConversations((prev) => [
+      ...prev,
+      {
+        id: `private-${clean}`,
+        type: "private",
+        title: `Private: ${clean}`,
+        participants: ["You", clean],
+        messages: [],
+      },
+    ]);
+    setNotifications((prev) => [`${clean} added to your friends list.`, ...prev]);
+    setNewFriendName("");
+    setStatus(`${clean} added as friend.`);
+    speak(`${clean} added as friend.`);
+  };
+
+  const removeFriend = (friendName) => {
+    setFriends((prev) => prev.filter((friend) => friend !== friendName));
+    setConversations((prev) => prev.filter((convo) => convo.id !== `private-${friendName}`));
+    if (activeConversationId === `private-${friendName}`) {
+      setActiveConversationId("group-team");
+    }
+    setNotifications((prev) => [`${friendName} removed from friends list.`, ...prev]);
+    setStatus(`${friendName} removed from friends list.`);
+  };
+
+  const createGroupChat = () => {
+    const clean = newGroupName.trim();
+    if (!clean) return;
+    const id = `group-${clean.toLowerCase().replace(/\s+/g, "-")}`;
+    if (conversations.some((conversation) => conversation.id === id)) {
+      setStatus("Group chat name already exists.");
+      return;
+    }
+    setConversations((prev) => [
+      ...prev,
+      {
+        id,
+        type: "group",
+        title: `Group: ${clean}`,
+        participants: ["You", ...friends.slice(0, 3)],
+        messages: [],
+      },
+    ]);
+    setActiveConversationId(id);
+    setNewGroupName("");
+    setNotifications((prev) => [`Group chat "${clean}" created.`, ...prev]);
+    setStatus(`Created group chat: ${clean}`);
+    speak(`Group chat ${clean} created.`);
+  };
+
+  const sendMessage = () => {
+    const text = chatMessage.trim();
+    if (!text) return;
+    const timestamp = new Date().toLocaleTimeString();
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === activeConversationId
+          ? {
+              ...conversation,
+              messages: [
+                ...conversation.messages,
+                { id: `${conversation.id}-${Date.now()}`, sender: "You", text, time: timestamp },
+              ],
+            }
+          : conversation,
+      ),
+    );
+    setChatMessage("");
+    setStatus("Message sent.");
+    speak(`Message sent: ${text}`);
+  };
+
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0];
 
   useEffect(() => {
     const video = videoRef.current;
@@ -483,16 +633,166 @@ export default function App() {
       <div className="ambient ambient--three" />
 
       {isLoggedIn ? (
-        <section className="login-card homescreen">
-          <h1 className="brand">
-            Ny<span>o</span>UI
-          </h1>
-          <h2>Welcome, {username}!</h2>
-          <p className="homescreen-welcome">You have successfully logged in.</p>
-          <div className="actions">
-            <button type="button" onClick={() => setShowGuide(true)}>CONTROLS</button>
-            <button type="button" onClick={handleLogout}>LOGOUT</button>
+        <section className="dashboard" aria-label="Messaging dashboard">
+          <div className="dashboard-top">
+            <div>
+              <h2>{getTimeGreeting()} {profile.name || username}!</h2>
+              <p className="small">Messaging dashboard active for {username}.</p>
+            </div>
+            <div className="top-actions">
+              <button type="button" onClick={() => setShowGuide(true)}>CONTROLS</button>
+              <button type="button" className="danger" onClick={handleLogout}>LOGOUT</button>
+            </div>
           </div>
+
+          <section className="controls-panel" aria-label="Controls preferences">
+            <h3>Controls</h3>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={ttsEnabled}
+                onChange={(e) => {
+                  setTtsEnabled(e.target.checked);
+                  setStatus(e.target.checked ? "Text-to-Speech enabled." : "Text-to-Speech disabled.");
+                }}
+              />
+              <span>Text-to-Speech {ttsEnabled ? "On" : "Off"}</span>
+            </label>
+          </section>
+
+          <div className="dashboard-grid">
+            <aside className="left-pane" aria-label="Profile and social panels">
+              <section className="card" aria-label="Profile settings">
+                <h3>Profile</h3>
+                <img className="profile-picture" src={profile.picture} alt={`${profile.name} profile`} />
+                <input
+                  type="url"
+                  value={profile.picture}
+                  onChange={(e) => updateProfileField("picture", e.target.value)}
+                  placeholder="Profile picture URL"
+                  aria-label="Profile picture URL"
+                />
+                <input
+                  type="text"
+                  value={profile.name}
+                  onChange={(e) => updateProfileField("name", e.target.value)}
+                  placeholder="Name"
+                  aria-label="Profile name"
+                />
+                <input
+                  type="text"
+                  value={profile.biography}
+                  onChange={(e) => updateProfileField("biography", e.target.value)}
+                  placeholder="Biography"
+                  aria-label="Profile biography"
+                />
+                <select
+                  value={profile.status}
+                  onChange={(e) => updateProfileField("status", e.target.value)}
+                  aria-label="User availability status"
+                >
+                  <option>Online</option>
+                  <option>Away</option>
+                  <option>Offline</option>
+                </select>
+              </section>
+
+              <section className="card" aria-label="Notifications">
+                <h3>Notifications</h3>
+                <ul className="list">
+                  {notifications.slice(0, 5).map((notice, idx) => (
+                    <li key={`${notice}-${idx}`}>
+                      <span>{notice}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+
+              <section className="card" aria-label="Friends list">
+                <h3>Friends List</h3>
+                <div className="inline-input">
+                  <input
+                    type="text"
+                    value={newFriendName}
+                    onChange={(e) => setNewFriendName(e.target.value)}
+                    placeholder="Add friend by name"
+                    aria-label="Add friend by name"
+                  />
+                  <button type="button" onClick={addFriend}>Add</button>
+                </div>
+                <ul className="list">
+                  {friends.map((friend) => (
+                    <li key={friend}>
+                      <button
+                        type="button"
+                        className={`list-open small-btn${activeConversationId === `private-${friend}` ? " active" : ""}`}
+                        onClick={() => setActiveConversationId(`private-${friend}`)}
+                      >
+                        {friend}
+                      </button>
+                      <button type="button" className="small-btn danger" onClick={() => removeFriend(friend)}>Remove</button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            </aside>
+
+            <section className="card chat-pane" aria-label="Chatbox">
+              <h3>Chatbox</h3>
+              <div className="inline-input">
+                <input
+                  type="text"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  placeholder="Create group chat"
+                  aria-label="Create group chat"
+                />
+                <button type="button" onClick={createGroupChat}>Create Group</button>
+              </div>
+
+              <div className="chat-tabs" role="tablist" aria-label="Conversations">
+                {conversations.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeConversationId === conversation.id}
+                    className={`chat-tab${activeConversationId === conversation.id ? " active" : ""}`}
+                    onClick={() => setActiveConversationId(conversation.id)}
+                  >
+                    {conversation.title}
+                  </button>
+                ))}
+              </div>
+
+              <div className="messages">
+                <p className="muted">
+                  {activeConversation?.type === "private" ? "Private Messages" : "Group Chat"} | Participants:{" "}
+                  {activeConversation?.participants.join(", ")}
+                </p>
+                <ul className="list messages-list" aria-label="Conversation messages">
+                  {(activeConversation?.messages ?? []).map((message) => (
+                    <li key={message.id}>
+                      <strong>{message.sender}</strong>
+                      <span>{message.text}</span>
+                      <em>{message.time}</em>
+                    </li>
+                  ))}
+                </ul>
+                <div className="inline-input">
+                  <input
+                    type="text"
+                    value={chatMessage}
+                    onChange={(e) => setChatMessage(e.target.value)}
+                    placeholder="Type a message"
+                    aria-label="Type a message"
+                  />
+                  <button type="button" onClick={sendMessage}>Send</button>
+                </div>
+              </div>
+            </section>
+          </div>
+
           <p className="status">{status}</p>
           <p className="meta">
             {handsSeen > 0 ? `${handsSeen} hand${handsSeen > 1 ? "s" : ""} tracked` : "Waiting for hands"}
@@ -594,6 +894,9 @@ export default function App() {
               </div>
               <div className="guide-item">
                 <strong>Click input directly:</strong> Point at input with cursor and thumbs up
+              </div>
+              <div className="guide-item">
+                <strong>Text-to-Speech:</strong> Use the Controls panel toggle to enable or disable spoken feedback
               </div>
             </div>
           </div>
