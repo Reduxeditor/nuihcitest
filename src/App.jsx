@@ -27,6 +27,20 @@ function getTimeGreeting() {
   return "Good Evening!";
 }
 
+function normalizeUsername(value) {
+  return String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function normalizePassword(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
 function isFingerExtended(lm, tip, pip) {
   const w = lm[0];
   const dTip = Math.hypot(lm[tip].x - w.x, lm[tip].y - w.y);
@@ -210,9 +224,9 @@ export default function App() {
   pendingFieldRef.current = pendingField;
 
   const handleLogin = () => {
-    const currentUsername = (username || usernameRef.current || "").trim();
-    const currentPassword = (password || passwordRef.current || "").trim();
-    if (currentUsername.toUpperCase() === ADMIN_USER && currentPassword.toLowerCase() === ADMIN_PASS) {
+    const currentUsername = normalizeUsername(username || usernameRef.current || "");
+    const currentPassword = normalizePassword(password || passwordRef.current || "");
+    if (currentUsername === ADMIN_USER && currentPassword === ADMIN_PASS) {
       setStatus("Login successful! Welcome, admin.");
       setIsLoggedIn(true);
       setNotifications((prev) => [`${getTimeGreeting()} You logged in successfully.`, ...prev]);
@@ -808,7 +822,13 @@ export default function App() {
             Ny<span>o</span>UI
           </h1>
 
-          <div className="fields">
+          <form
+            className="fields"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleLogin();
+            }}
+          >
             <label className={activeField === "username" ? "field active" : "field"}>
               <span>Username</span>
               <input
@@ -840,7 +860,7 @@ export default function App() {
                 placeholder="SPEECH OR TYPE PASSWORD"
               />
             </label>
-          </div>
+          </form>
 
           <div className="actions">
             <button type="button" onClick={() => setShowGuide(true)}>CONTROLS</button>
