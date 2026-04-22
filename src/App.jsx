@@ -193,6 +193,7 @@ export default function App() {
   const isListeningRef = useRef(false);
   const ttsEnabledRef = useRef(ttsEnabled);
   const lastSpokenRef = useRef({ text: "", at: 0 });
+  const hoverSpeakRef = useRef({ text: "", at: 0, element: null });
 
   const speak = (text) => {
     if (!ttsEnabledRef.current || !window.speechSynthesis) return;
@@ -299,6 +300,22 @@ export default function App() {
     );
     const text = getTextToRead(target);
     if (text) speak(text);
+  };
+
+  const speakHoveredElement = (element) => {
+    if (!ttsEnabledRef.current || !element) return;
+    const readableTarget = element.closest(
+      "[data-tts], button, input, textarea, select, label, h1, h2, h3, p, span, li, strong, em",
+    );
+    if (!readableTarget) return;
+    const text = getTextToRead(readableTarget);
+    if (!text) return;
+    const now = Date.now();
+    const isSameElement = hoverSpeakRef.current.element === readableTarget;
+    const isSameText = hoverSpeakRef.current.text === text;
+    if ((isSameElement || isSameText) && now - hoverSpeakRef.current.at < 1000) return;
+    hoverSpeakRef.current = { element: readableTarget, text, at: now };
+    speak(text);
   };
 
   const addFriend = () => {
@@ -539,6 +556,10 @@ export default function App() {
         const tipX = 1 - pointingHand[INDEX_TIP].x;
         const tipY = pointingHand[INDEX_TIP].y;
         setCursorPos({ x: tipX * 100, y: tipY * 100 });
+        const hoverX = tipX * window.innerWidth;
+        const hoverY = tipY * window.innerHeight;
+        const hoveredElement = document.elementFromPoint(hoverX, hoverY);
+        speakHoveredElement(hoveredElement);
 
         const speechGesture = activeFieldRef.current && isIndexPointingUp(pointingHand);
         if (speechGesture) {
@@ -691,6 +712,17 @@ export default function App() {
         recognitionRef.current.abort();
         recognitionRef.current = null;
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (event) => {
+      const hoveredElement = document.elementFromPoint(event.clientX, event.clientY);
+      speakHoveredElement(hoveredElement);
+    };
+    window.addEventListener("mousemove", handleMouseMove, { passive: true });
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
     };
   }, []);
 
