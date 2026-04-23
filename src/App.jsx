@@ -561,7 +561,7 @@ export default function App() {
         const hoveredElement = document.elementFromPoint(hoverX, hoverY);
         speakHoveredElement(hoveredElement);
 
-        const speechGesture = activeFieldRef.current && isIndexPointingUp(pointingHand);
+        const speechGesture = activeFieldRef.current && isIndexPointingUp(pointingHand) && document.activeElement?.tagName === "INPUT";
         if (speechGesture) {
           if (!mouthGestureRef.current.active) {
             mouthGestureRef.current = { active: true, since: now };
